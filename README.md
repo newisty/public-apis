@@ -1961,9 +1961,8 @@ curl https://newisty.com/api/ai/raw \
 ```jsonc
 {
   // ...upstream...
-  "provider": "Newisty", // setting('ai_gateway_provider_label') ?: setting('site_name')
+  "provider": "Newisty", // setting('ai_gateway_provider_label')
   "gateway": {
-    "upstream": "hvoyai-api-groq-com-7842",
     "upstream_shape": "chat_completions",
     "inbound_shape": "chat_completions",
     "model_requested": "gpt-4o",
