@@ -81,6 +81,7 @@ Errors:
 8. [Lookups (Light task, 10/min)](#lookups-light-task-10min)
 9. [Lookups (Heavy task, 5/min)](#lookups-heavy-task-5min)
 10. [Calculators](#calculators)
+11. [AI Gateway](#ai-gateway)
 
 ---
 
@@ -1873,6 +1874,106 @@ curl -X POST https://newisty.com/api/readability/extract \
 ```
 
 Note: `article` can be `null` for pages where no article is detected (e.g. single-purpose landing pages).
+
+---
+
+## AI Gateway
+
+Unified, authenticated proxy for `chat_completions`, `responses`, `messages`, `gemini` and raw `custom` upstreams. One client base URL, routed by exact `model` id with priority-ordered fallback. Upstream bodies are relayed verbatim with gateway metadata merged.
+
+**Base URL:** `https://newisty.com/api/ai` — route names `api.ai-gateway.*` (use `route('api.ai-gateway.chat-completions')` etc., not hard-coded).
+
+**Auth:** `Authorization: Bearer sk-gw-...` or `x-api-key: sk-gw-...` (Anthropic SDKs). `GET /models` also requires auth and is filtered by key `allowed_models`.
+
+**Rate:** global `throttle:60,1` on `api/ai` + per-key `rate_limit_per_minute` (if set). Exceeding returns `429` with OpenAI error shape.
+
+**Error envelope (always OpenAI-shaped, not `status/message/data`):**
+```json
+{ "error": { "message": "...", "type": "invalid_request_error", "code": "model_not_found" } }
+```
+`401 invalid_api_key`, `403 model_not_allowed`, `404 model_not_found`, `400 stream_not_supported|missing_model|unsupported_gemini_method`, `502 all_providers_failed`, `429 rate_limited`.
+
+**Endpoints:**
+
+| Method | Path | Inbound shape | Upstream mapping |
+|---|---|---|---|
+| GET | `/api/ai/models` | — | OpenAI list, filtered by `allowed_models` |
+| POST | `/api/ai/chat/completions` | OpenAI Chat | translated per provider `api_compatible` |
+| POST | `/api/ai/responses` | OpenAI Responses | `→ chat_completions/messages/gemini` |
+| POST | `/api/ai/messages` | Anthropic Messages | `x-api-key` + `anthropic-version` upstream |
+| POST | `/api/ai/v1beta/models/{model}:generateContent` | Google Gemini (`contents[]`, `systemInstruction`, `generationConfig`) | `?key=` or `x-goog-api-key` upstream |
+| POST | `/api/ai/raw` | Raw passthrough (body relayed verbatim) | `custom` upstream at its `base_url`; model from `body.model` or `X-Gateway-Model` header; `400 missing_model` if absent; `stream:true` still `400` |
+
+### GET `/api/ai/models`
+
+List distinct routable model ids (active provider + active model, `allowed_models` filtered).
+
+**Example:**
+```bash
+curl https://newisty.com/api/ai/models \
+  -H "Authorization: Bearer sk-gw-..."
+```
+**Response:**
+```json
+{ "object": "list", "data": [{ "id": "gpt-4o", "object": "model", "owned_by": "mySiteName" }] }
+```
+
+### POST `/api/ai/chat/completions`
+
+**Params:** `model` (string, required), `messages` (array), `system` (string), `max_tokens`, `temperature`, `top_p`, `stop`, `stream` (refused).
+
+**Example:**
+```bash
+curl https://newisty.com/api/ai/chat/completions \
+  -H "Authorization: Bearer sk-gw-..." -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}'
+```
+
+### POST `/api/ai/messages` (Anthropic)
+
+```bash
+curl https://newisty.com/api/ai/messages \
+  -H "x-api-key: sk-gw-..." -H "Content-Type: application/json" \
+  -d '{"model":"claude-3-5-sonnet-20241022","max_tokens":1024,"messages":[{"role":"user","content":"ping"}]}'
+```
+
+### POST `/api/ai/v1beta/models/{model}:generateContent` (Gemini)
+
+Path captures `{model}` whole; SDK glues method onto model. `:generateContent` dispatches, `:streamGenerateContent` → `400 stream_not_supported`.
+
+```bash
+curl https://newisty.com/api/ai/v1beta/models/gemini-1.5-flash:generateContent \
+  -H "Authorization: Bearer sk-gw-..." -H "Content-Type: application/json" \
+  -d '{"contents":[{"parts":[{"text":"ping"}]}]}'
+```
+
+### POST `/api/ai/raw`
+
+```bash
+curl https://newisty.com/api/ai/raw \
+  -H "Authorization: Bearer sk-gw-..." -H "X-Gateway-Model: gpt-4o" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"ping"}]}'
+```
+
+**Success response:** upstream JSON object verbatim + injected `provider`/`gateway` (unless `inject_metadata=false` per key or `setting('ai_gateway_inject_metadata')` off). Arrays/scalars/non-JSON pass through untouched; existing upstream keys never overwritten. Headers always include `X-Gateway-*`:
+
+```jsonc
+{
+  // ...upstream...
+  "provider": "Newisty", // setting('ai_gateway_provider_label') ?: setting('site_name')
+  "gateway": {
+    "upstream": "hvoyai-api-groq-com-7842",
+    "upstream_shape": "chat_completions",
+    "inbound_shape": "chat_completions",
+    "model_requested": "gpt-4o",
+    "model_used": "gpt-4o",
+    "attempts": 1,
+    "latency_ms": 812
+  }
+}
+```
+Cross-shape fallback returns upstream's shape; `gateway.upstream_shape` tells which. Constrain `allowed_models` to same-shape if client cannot handle.
 
 ---
 
